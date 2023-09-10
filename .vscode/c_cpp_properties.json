@@ -1,0 +1,12 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "defines": [
+                "UNICODE"
+            ],
+            "cppStandard": "c++20"
+        }
+    ],
+    "version": 4
+}
