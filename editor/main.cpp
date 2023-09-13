@@ -10,6 +10,7 @@
 #include <memory>
 #include <Shlwapi.h>
 #include "../common/file.hpp"
+#include "resource.h"
 
 #pragma comment(lib, "Gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -85,15 +86,18 @@ VOID OnPaint(HDC hdc)
 
     // 色設定
     const Gdiplus::Color backgroundColor{255, 240, 240, 240};
+    const Gdiplus::Color imageBackgroundColor{255, 255, 255, 255};
     const Gdiplus::Color activeColor{255, 255, 0, 0};
     const Gdiplus::Color lineColor{255, 0, 0, 255};
+    const Gdiplus::Color pointEdgeColor{255, 0, 0, 0};
     const Gdiplus::Color helpLineColor{128, 255, 0, 255};
-    const double lineWidth = 2.0;
-    const double pointSize = 12.0;
+    const double lineWidth = 3.0;
+    const double pointRadius = 6.0;
+    const double pointEdgeWidth = 1.0;
     const double helpLineWidth = 1.0;
 
     // 背景
-    graphics->Clear(backgroundColor);
+    graphics->Clear(imageBackgroundColor);
 
     if (image != nullptr)
     {
@@ -130,8 +134,10 @@ VOID OnPaint(HDC hdc)
         for (int i = 0; i < points.size(); i++)
         {
             const Gdiplus::SolidBrush brush(activeObject == i ? activeColor : lineColor);
+            const Gdiplus::Pen pen(pointEdgeColor, pointEdgeWidth);
             const math::Point p = displayTransform * points[i];
-            graphics->FillRectangle(&brush, CR2RECT(p, pointSize / 2));
+            graphics->FillEllipse(&brush, CR2RECT(p, pointRadius));
+            graphics->DrawEllipse(&pen, CR2RECT(p, pointRadius));
         }
     }
 
@@ -542,7 +548,7 @@ INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, INT iCmdShow
     wndClass.cbClsExtra = 0;
     wndClass.cbWndExtra = 0;
     wndClass.hInstance = hInstance;
-    wndClass.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wndClass.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_ICON1));
     wndClass.hCursor = LoadCursor(NULL, IDC_ARROW);
     wndClass.hbrBackground = CreateSolidBrush(RGB(240, 240, 240));
     wndClass.lpszMenuName = NULL;
