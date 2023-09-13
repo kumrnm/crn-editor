@@ -11,6 +11,7 @@
 #include <Shlwapi.h>
 #include "../common/file.hpp"
 #include "resource.h"
+#include <queue>
 
 #pragma comment(lib, "Gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -29,7 +30,7 @@
                                 (radius)*2
 
 HWND hWnd;
-int need_repaint = 0;
+int need_repaint = 0; // 0:なし 1:画像エリア再描画 2:ウィンドウ全体を再描画
 
 math::Point circleCenter{100, 100};
 double circleRadius = 90;
@@ -42,23 +43,27 @@ int activeObject = OBJECT_NONE;
 bool editing = false;
 std::unique_ptr<Gdiplus::Image> image = nullptr;
 math::Point imageSize;
-math::Transform imageTransform;
+math::Transform imageTransform; // 画像座標からウィンドウ座標への変換
 math::Point windowAreaSize;
 constexpr int imageAreaY = 24 * 3 + 4 * 4;
 CrnData crnData;
 String crnPath;
 
+// 左右キーで別のファイルに移動するための情報
 String pngDirectory;
 std::vector<String> pngFileNames;
 int pngFileIndex = 0;
 
 HWND hWnd_characterName, hWnd_imageName, hWnd_lineType, hWnd_direction;
+std::queue<String> errorMessageQueue;
 
 void showError(const std::wstring &message)
 {
     if (!message.empty())
     {
-        MessageBox(NULL, message.c_str(), TEXT("CRN エディタ"), MB_ICONERROR | MB_OK);
+        // 画面再描画後にウィンドウを出す
+        errorMessageQueue.push(message);
+        need_repaint = 2;
     }
 }
 
@@ -78,6 +83,7 @@ VOID OnPaint(HDC hdc)
 {
     Gdiplus::Graphics windowGraphics(hdc);
 
+    // 画面のチラつき防止のためにバッファに描画
     Gdiplus::Bitmap bufferBitmap(XY(imageSize * imageTransform.scale));
     Gdiplus::Graphics *graphics = Gdiplus::Graphics::FromImage(&bufferBitmap);
 
@@ -92,12 +98,12 @@ VOID OnPaint(HDC hdc)
     const Gdiplus::Color pointEdgeColor{255, 0, 0, 0};
     const Gdiplus::Color helpLineColor{128, 255, 0, 255};
     const double lineWidth = 3.0;
-    const double pointRadius = 6.0;
+    const double pointRadius = 8.0;
     const double pointEdgeWidth = 1.0;
     const double helpLineWidth = 1.0;
 
     // 背景
-    graphics->Clear(imageBackgroundColor);
+    graphics->Clear(image != nullptr ? imageBackgroundColor : backgroundColor);
 
     if (image != nullptr)
     {
@@ -149,6 +155,11 @@ VOID OnPaint(HDC hdc)
     delete graphics;
 
     need_repaint = 0;
+
+    while (!errorMessageQueue.empty()) {
+        MessageBox(NULL, errorMessageQueue.front().c_str(), TEXT("CRN エディタ"), MB_ICONERROR | MB_OK);
+        errorMessageQueue.pop();
+    }
 }
 
 bool inCrnDataToViewData = false;
@@ -167,10 +178,12 @@ void crnDataToViewData(const CrnData &crnData, bool onlyPoints = false)
         return;
 
     inCrnDataToViewData = true;
+
     SetWindowTextW(hWnd_characterName, string::utf8_to_wstring(crnData.characterName).c_str());
     SetWindowTextW(hWnd_imageName, string::utf8_to_wstring(crnData.imageName).c_str());
     SendMessage(hWnd_lineType, CB_SETCURSEL, crnData.centerLine.size() - 2, 0);
     SendMessage(hWnd_direction, CB_SETCURSEL, static_cast<int>(crnData.direction), 0);
+
     inCrnDataToViewData = false;
 }
 
@@ -203,144 +216,166 @@ void viewDataToCrnData(CrnData &crnData, bool onlyPoints = false)
         return;
 
     // コントロール類
-    wchar_t str[1024] = {};
-    GetWindowTextW(hWnd_characterName, str, sizeof(str));
+    static TCHAR str[1024] = {};
+    GetWindowText(hWnd_characterName, str, sizeof(str) / sizeof(TCHAR));
     crnData.characterName = string::wstring_to_utf8(str);
-    GetWindowTextW(hWnd_imageName, str, sizeof(str));
+    GetWindowText(hWnd_imageName, str, sizeof(str) / sizeof(TCHAR));
     crnData.imageName = string::wstring_to_utf8(str);
     crnData.direction = static_cast<CrnData::Direction>(SendMessage(hWnd_direction, CB_GETCURSEL, 0, 0));
 }
 
-bool openFile(String filePath, const bool createPngIndex = false)
+bool openFile(String filePath, const bool createPngIndex = false, const bool keepWindowTitleWhenFailed = false)
 {
     activeObject = OBJECT_NONE;
     editing = false;
-    image = nullptr;
+    need_repaint = 2;
 
-    // フォルダが指定された場合、最初のpngファイルを開く
-    const auto fileAttribute = GetFileAttributes(filePath.c_str());
-    if (fileAttribute != INVALID_FILE_ATTRIBUTES && (fileAttribute & FILE_ATTRIBUTE_DIRECTORY))
-    {
-        pngDirectory = filePath;
-        if (*pngDirectory.rbegin() != '\\')
-        {
-            pngDirectory += '\\';
-        }
-        WIN32_FIND_DATA ffd;
-        HANDLE hFind = FindFirstFile((pngDirectory + TEXT("*.png")).c_str(), &ffd);
-        if (hFind != INVALID_HANDLE_VALUE)
-        {
-            filePath = pngDirectory + ffd.cFileName;
-        }
-        else
-        {
-            showError(TEXT("フォルダ ") + pngDirectory + TEXT(" 内にPNG画像はありません"));
-            image = nullptr;
-            return false;
-        }
-    }
+    std::unique_ptr<Gdiplus::Image> newImage = nullptr;
 
-    // CRNファイルが指定された場合、対応する画像ファイル名に変換
-    const auto imagePath = [&]() -> String
-    {
-        const auto ext = string::lower(filePath.size() >= 4 ? filePath.substr(filePath.size() - 4) : TEXT(""));
-        if (ext == TEXT(".crn"))
-        {
-            crnPath = filePath;
-            return filePath.substr(0, filePath.size() - 4);
-        }
-        else
-        {
-            crnPath = filePath + TEXT(".crn");
-            return filePath;
-        }
-    }();
-    SetWindowText(hWnd, (TEXT("CRN エディタ - ") + imagePath).c_str());
+    String errorMessage;
 
-    // 後に左右キーで別の画像ファイルに移動できるようにインデックスを作成する
-    if (createPngIndex)
-    {
-        const auto sp = imagePath.find_last_of('\\');
-        String targetLowerName;
-        if (sp != String::npos)
-        {
-            pngDirectory = imagePath.substr(0, sp + 1);
-            targetLowerName = string::lower(imagePath.substr(sp + 1));
-        }
-        else
-        {
-            pngDirectory = TEXT("..\\");
-            targetLowerName = string::lower(imagePath);
-        }
-
-        pngFileNames = getFileList(pngDirectory + TEXT("*.png"));
-        pngFileIndex = 0;
-        for (int i = 0; i < pngFileNames.size(); i++)
-        {
-            if (string::lower(pngFileNames[i]) == targetLowerName)
-            {
-                pngFileIndex = i;
-                break;
-            }
-        }
-    }
+    TCHAR windowTitleBuffer[keepWindowTitleWhenFailed ? MAX_PATH + 100 : 0];
+    if (keepWindowTitleWhenFailed)
+        GetWindowText(hWnd, windowTitleBuffer, sizeof(windowTitleBuffer) / sizeof(TCHAR));
 
     try
     {
-        image = std::make_unique<Gdiplus::Bitmap>(string::toWideChar(imagePath).c_str());
-        if (image->GetLastStatus() != Gdiplus::Status::Ok)
+        // フォルダが指定された場合、フォルダ内の最初のpngファイルを開く
+        const auto fileAttribute = GetFileAttributes(filePath.c_str());
+        if (fileAttribute != INVALID_FILE_ATTRIBUTES && (fileAttribute & FILE_ATTRIBUTE_DIRECTORY))
         {
-            throw std::exception();
+            pngDirectory = filePath;
+            if (*pngDirectory.rbegin() != '\\')
+            {
+                pngDirectory += '\\';
+            }
+            WIN32_FIND_DATA ffd;
+            HANDLE hFind = FindFirstFile((pngDirectory + TEXT("*.png")).c_str(), &ffd);
+            if (hFind != INVALID_HANDLE_VALUE)
+            {
+                filePath = pngDirectory + ffd.cFileName;
+            }
+            else
+            {
+                errorMessage = TEXT("フォルダ ") + pngDirectory + TEXT(" 内にPNG画像はありません");
+                throw std::exception();
+            }
         }
-        recalcImageTransform();
-    }
-    catch (...)
-    {
-        showError(TEXT("画像ファイル ") + imagePath + TEXT(" の読み込みに失敗しました"));
-        image = nullptr;
-        return false;
-    }
 
-    if (PathFileExists(crnPath.c_str()))
-    {
-        // crnファイルあり：読み込む
+        // CRNファイルが指定された場合、対応する画像ファイル名に変換
+        const auto imagePath = [&]() -> String
+        {
+            const auto ext = string::lower(filePath.size() >= 4 ? filePath.substr(filePath.size() - 4) : TEXT(""));
+            if (ext == TEXT(".crn"))
+            {
+                crnPath = filePath;
+                return filePath.substr(0, filePath.size() - 4);
+            }
+            else
+            {
+                crnPath = filePath + TEXT(".crn");
+                return filePath;
+            }
+        }();
+        SetWindowText(hWnd, (TEXT("CRN エディタ - ") + imagePath).c_str());
+
+        // 後に左右キーで別の画像ファイルに移動できるようにインデックスを作成する
+        if (createPngIndex)
+        {
+            const auto sp = imagePath.find_last_of('\\');
+            String targetLowerName;
+            if (sp != String::npos)
+            {
+                pngDirectory = imagePath.substr(0, sp + 1);
+                targetLowerName = string::lower(imagePath.substr(sp + 1));
+            }
+            else
+            {
+                pngDirectory = TEXT("..\\");
+                targetLowerName = string::lower(imagePath);
+            }
+
+            pngFileNames = getFileList(pngDirectory + TEXT("*.png"));
+            pngFileIndex = 0;
+            for (int i = 0; i < pngFileNames.size(); i++)
+            {
+                if (string::lower(pngFileNames[i]) == targetLowerName)
+                {
+                    pngFileIndex = i;
+                    break;
+                }
+            }
+        }
+
+        // 画像読み込み
         try
         {
-            crnData = CrnData::load(string::toMultiByte(crnPath));
-        }
-        catch (const CrnData::jsonVersionException &)
-        {
-            showError(TEXT("CRNファイル") + crnPath + TEXT(" のバージョンが本アプリケーションのサポート対象外です。"));
-            image = nullptr;
-            return false;
+            newImage = std::make_unique<Gdiplus::Bitmap>(string::toWideChar(imagePath).c_str());
+            if (newImage->GetLastStatus() != Gdiplus::Status::Ok)
+            {
+                throw std::exception();
+            }
         }
         catch (...)
         {
-            showError(TEXT("CRNファイル") + crnPath + TEXT(" の読み込みに失敗しました"));
-            image = nullptr;
-            return false;
+            errorMessage = TEXT("画像ファイル ") + imagePath + TEXT(" の読み込みに失敗しました");
+            throw;
         }
-    }
-    else
-    {
-        // crnファイルなし：画像サイズに基づくデフォルト値を使用
-        crnData = CrnData{};
-        const double x = image->GetWidth() / 2;
-        const double h = image->GetHeight();
-        crnData.headPosition = {x, h * 0.25};
-        crnData.headRadius = h * 0.15;
-        crnData.centerLine = {{x, h * 0.05}, {x, h * 0.95}};
-    }
 
-    crnDataToViewData(crnData);
+        // crnデータ読み込み
+        if (PathFileExists(crnPath.c_str()))
+        {
+            // crnファイルあり：読み込む
+            try
+            {
+                crnData = CrnData::load(string::toMultiByte(crnPath));
+            }
+            catch (const CrnData::jsonVersionException &)
+            {
+                errorMessage = TEXT("CRNファイル") + crnPath + TEXT(" のバージョンが本アプリケーションのサポート対象外です。");
+                throw;
+            }
+            catch (...)
+            {
+                errorMessage = TEXT("CRNファイル") + crnPath + TEXT(" の読み込みに失敗しました");
+                throw;
+            }
+        }
+        else
+        {
+            // crnファイルなし：画像サイズに基づくデフォルト値を使用
+            crnData = CrnData{};
+            const double x = newImage->GetWidth() / 2;
+            const double h = newImage->GetHeight();
+            crnData.headPosition = {x, h * 0.25};
+            crnData.headRadius = h * 0.15;
+            crnData.centerLine = {{x, h * 0.05}, {x, h * 0.95}};
+        }
+
+        image = std::move(newImage);
+        recalcImageTransform();
+        crnDataToViewData(crnData);
+    }
+    catch (...)
+    {
+        if (errorMessage.empty())
+            errorMessage = TEXT("ファイル") + filePath + TEXT("の読み込み時に予期せぬエラーが発生しました");
+        showError(errorMessage);
+
+        if (keepWindowTitleWhenFailed)
+            SetWindowText(hWnd, windowTitleBuffer);
+
+        return false;
+    }
 
     showError(TEXT(""));
-    need_repaint = 2;
     return true;
 }
 
 int pickObject(const math::Point &p)
 {
+    // 与えられた点に近い、ドラッグで動かせるパーツ（キャラクター中心線の端点・頭部円）
+
     const double hitAreaSize = 12.0;
 
     std::vector<std::pair<double, int>> candidates; // (distance, objectIndex)
@@ -399,6 +434,7 @@ VOID OnMouseMove(const math::Point &p)
 
     if (editing)
     {
+        // 編集
         if (activeObject == OBJECT_CIRCLE && GetKeyState(VK_SHIFT) < 0)
         {
             circleRadius -= p.y - previousMousePosition.y;
@@ -430,7 +466,7 @@ VOID OnMouseMove(const math::Point &p)
 
 VOID OnMouseDown(const math::Point &p)
 {
-    SetFocus(hWnd);
+    SetFocus(hWnd); // 画面外のMouseMoveを拾えるように
     if (activeObject != OBJECT_NONE)
     {
         editing = true;
@@ -444,6 +480,28 @@ void save()
         viewDataToCrnData(crnData);
         crnData.save(string::toMultiByte(crnPath));
     }
+}
+
+void unload()
+{
+    image = nullptr;
+    imageSize = {0, 0};
+
+    crnData = CrnData{};
+    editing = false;
+    activeObject = OBJECT_NONE;
+
+    inCrnDataToViewData = true;
+
+    SetWindowTextW(hWnd_characterName, TEXT(""));
+    SetWindowTextW(hWnd_imageName, TEXT(""));
+    SendMessage(hWnd_lineType, CB_SETCURSEL, -1, 0);
+    SendMessage(hWnd_direction, CB_SETCURSEL, -1, 0);
+    SetWindowText(hWnd, TEXT("CRN エディタ - "));
+
+    inCrnDataToViewData = false;
+
+    need_repaint = 2;
 }
 
 VOID OnMouseUp(const math::Point &p)
@@ -478,55 +536,75 @@ VOID OnKeyDown(const WPARAM key)
 {
     if (key == VK_LEFT)
     {
+        // Shift + 左キー : 向きを「左向き」に設定
         if (GetKeyState(VK_SHIFT) < 0)
         {
-            crnData.direction = CrnData::Direction::Left;
-            crnDataToViewData(crnData);
-            return;
+            if (image != nullptr)
+            {
+                crnData.direction = CrnData::Direction::Left;
+                crnDataToViewData(crnData);
+                return;
+            }
         }
 
+        // 左キー : 前の画像へ移動
         if (pngFileIndex - 1 >= 0)
         {
             save();
+            unload();
             pngFileIndex--;
             openFile(pngDirectory + pngFileNames[pngFileIndex]);
         }
     }
     else if (key == VK_RIGHT)
     {
+        // Shift + 右キー : 向きを「右向き」に設定
         if (GetKeyState(VK_SHIFT) < 0)
         {
-            crnData.direction = CrnData::Direction::Right;
-            crnDataToViewData(crnData);
-            return;
+            if (image != nullptr)
+            {
+
+                crnData.direction = CrnData::Direction::Right;
+                crnDataToViewData(crnData);
+                return;
+            }
         }
 
+        // 右キー : 次の画像へ移動
         if (pngFileIndex + 1 < pngFileNames.size())
         {
             save();
+            unload();
             pngFileIndex++;
             openFile(pngDirectory + pngFileNames[pngFileIndex]);
         }
     }
     else if (key == VK_DOWN)
     {
+        // Shift + 下キー：向きを「正面」に設定
         if (GetKeyState(VK_SHIFT) < 0)
         {
-            crnData.direction = CrnData::Direction::None;
-            crnDataToViewData(crnData);
-            return;
+            if (image != nullptr)
+            {
+                crnData.direction = CrnData::Direction::None;
+                crnDataToViewData(crnData);
+                return;
+            }
         }
     }
     else if (key == '2')
     {
+        // 2キー : 中心線を「直線」に設定
         changeLineType(2);
     }
     else if (key == '3')
     {
+        // 3キー : 中心線を「折れ線」に設定
         changeLineType(3);
     }
     else if (key == 'D')
     {
+        // Dキー：デバッグ用
         // DEBUG_LOG(imageTransform.shift.x << TEXT(",") << imageTransform.shift.y << TEXT("    ") << imageTransform.scale);
     }
 }
@@ -569,11 +647,14 @@ INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, INT iCmdShow
         hInstance,            // program instance handle
         NULL);                // creation parameters
 
+    DragAcceptFiles(hWnd, TRUE);
+
     ShowWindow(hWnd, iCmdShow);
     UpdateWindow(hWnd);
 
     OnResize(); // get window size and initialize GUI
 
+    // コマンドライン引数が与えられたら、そのファイルパスを開く
     LPWSTR *szArglist;
     int nArgs;
     szArglist = CommandLineToArgvW(GetCommandLineW(), &nArgs);
@@ -582,6 +663,7 @@ INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, INT iCmdShow
         openFile(szArglist[1], true);
     }
 
+    // メインループ
     while (GetMessage(&msg, NULL, 0, 0))
     {
         TranslateMessage(&msg);
@@ -594,7 +676,7 @@ INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, INT iCmdShow
         Sleep(10);
     }
 
-    image = nullptr;
+    image = nullptr; // ちゃんと捨てておかないと怒られる
     Gdiplus::GdiplusShutdown(gdiplusToken);
     return msg.wParam;
 } // WinMain
@@ -609,6 +691,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
     {
     case WM_CREATE:
     {
+        // GUI作成（左上のコントロール群）
+
         constexpr int margin = 4;
         constexpr int rowHeight = 24;
 
@@ -677,26 +761,34 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
         assert(y == imageAreaY);
     }
         return 0;
+
     case WM_COMMAND:
     {
+        if (image == nullptr)
+            return 0;
+
         const auto wID = LOWORD(wParam);
         const auto wNotifyCode = HIWORD(wParam);
         const auto hwndControl = reinterpret_cast<HWND>(lParam);
 
         if (wNotifyCode == EN_CHANGE && !inCrnDataToViewData)
         {
+            // テキストボックス編集時：crnDataに反映
             viewDataToCrnData(crnData);
         }
         else if (wNotifyCode == CBN_SELCHANGE)
         {
             if (hwndControl == hWnd_lineType)
             {
-                if (!inCrnDataToViewData)
+                // 中心線タイプ変更
+                if (!inCrnDataToViewData) // プログラム側からの変更でも発火してしまうのでブロック
                     changeLineType(SendMessage(hWnd_lineType, CB_GETCURSEL, 0, 0) + 2);
             }
             else if (hwndControl == hWnd_direction)
             {
-                viewDataToCrnData(crnData);
+                // 向き変更
+                if (!inCrnDataToViewData) // プログラム側からの変更でも発火してしまうのでブロック
+                    viewDataToCrnData(crnData);
             }
         }
         else if (wNotifyCode == BN_CLICKED)
@@ -712,6 +804,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
                 DEBUG_LOG(TEXT("出力"));
             }
         }
+    }
+        return 0;
+    case WM_DROPFILES:
+    {
+        // ファイルをドロップして開く
+        save();
+        unload();
+        const auto hDrop = reinterpret_cast<HDROP>(wParam);
+        TCHAR fileName[MAX_PATH] = {};
+        DragQueryFile(hDrop, 0, fileName, sizeof(fileName) / sizeof(TCHAR));
+        openFile(fileName, true);
     }
         return 0;
     case WM_SIZE:
