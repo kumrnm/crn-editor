@@ -171,7 +171,7 @@ VOID OnPaint(HDC hdc)
 
     while (!errorMessageQueue.empty())
     {
-        MessageBox(NULL, errorMessageQueue.front().c_str(), APP_NAME, MB_ICONERROR | MB_OK);
+        MessageBox(hWnd, errorMessageQueue.front().c_str(), APP_NAME, MB_ICONERROR | MB_OK);
         errorMessageQueue.pop();
     }
 }
@@ -528,7 +528,7 @@ void batchRenameCrn(const std::string &newName)
                         << TEXT("\" に変更しますか？")
                         << TEXT("\n\nこの操作は元に戻せません。")
                         << TEXT("\nまた、処理には数分かかる可能性があります。");
-        if (MessageBox(NULL, confirmationMsg.str().c_str(), TEXT("キャラクター名一括変更 - ") APP_NAME, MB_YESNO) != IDYES)
+        if (MessageBox(hWnd, confirmationMsg.str().c_str(), TEXT("キャラクター名一括変更 - ") APP_NAME, MB_YESNO) != IDYES)
             return;
     }
 
@@ -571,7 +571,7 @@ void batchRenameCrn(const std::string &newName)
               << TEXT("変更済み: ") << changed << TEXT(" 件    ")
               << TEXT("スキップ: ") << skipped << TEXT(" 件    ")
               << TEXT("エラー: ") << failed << TEXT(" 件");
-    MessageBox(NULL, resultMsg.str().c_str(), TEXT("キャラクター名一括変更 - ") APP_NAME, MB_OK);
+    MessageBox(hWnd, resultMsg.str().c_str(), TEXT("キャラクター名一括変更 - ") APP_NAME, MB_OK);
 }
 
 VOID OnMouseUp(const math::Point &p)
@@ -742,8 +742,8 @@ INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, INT iCmdShow
         {
             InvalidateRect(hWnd, NULL, FALSE);
             UpdateWindow(hWnd);
+            Sleep(10);
         }
-        Sleep(10);
     }
 
     image = nullptr; // ちゃんと捨てておかないと怒られる
