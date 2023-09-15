@@ -1097,7 +1097,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
                 MessageBox(hWnd,
                            TEXT("「キャラクター名」「素材名」は正規化後のファイル名に使用されます。\n\n")
                                TEXT("【例】キャラクター名「RU」素材名「ぷはー」の場合    RU_00s_ぷはー.png\n\n")
-                                   TEXT("ファイル名に使用できない文字を含めることはできません。\n")
+                                   TEXT("ファイル名に使用できない文字、および半角アンダースコアを含めることはできません。\n")
                                        TEXT("素材名は省略可能です。"),
                            APP_NAME,
                            MB_ICONINFORMATION | MB_OK);

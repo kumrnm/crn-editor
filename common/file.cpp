@@ -39,6 +39,7 @@ String fixFileName(const String &str)
         case TEXT('<'):
         case TEXT('>'):
         case TEXT('|'):
+        case TEXT('_'):
             continue;
         default:
             res.push_back(c);
