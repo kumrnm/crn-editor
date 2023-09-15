@@ -19,7 +19,7 @@
 #pragma comment(lib, "shlwapi.lib")
 
 #define APP_NAME TEXT("CRN エディタ")
-#define APP_VERSION TEXT("v1.0.0")
+#define APP_VERSION TEXT("1.0")
 
 #define DEBUG_LOG(...)                                                \
     {                                                                 \
@@ -59,7 +59,7 @@ String pngDirectory;              // 現在開いているpngファイルが存�
 std::vector<String> pngFileNames; // pngDirectoryに存在するpngファイルの名前一覧
 int pngFileIndex = 0;             // 現在開いているpngファイルがディレクトリ内で何番目のファイルか
 
-HWND hWnd_characterName, hWnd_imageName, hWnd_lineType, hWnd_direction;
+HWND hWnd_characterName, hWnd_imageName, hWnd_lineType, hWnd_direction, hWnd_versionButton;
 std::queue<String> errorMessageQueue;
 
 void showError(const std::wstring &message)
@@ -284,13 +284,13 @@ bool openFile(String filePath, const bool createPngIndex = false)
         }
 
         // CRNファイルが指定された場合、対応する画像ファイル名に変換
+        String fileExtension = string::lower(PathFindExtension(filePath.c_str()));
         const auto imagePath = [&]() -> String
         {
-            const auto ext = string::lower(filePath.size() >= 4 ? filePath.substr(filePath.size() - 4) : TEXT(""));
-            if (ext == TEXT(".crn"))
+            if (fileExtension == TEXT(".crn"))
             {
                 crnPath = filePath;
-                return filePath.substr(0, filePath.size() - 4);
+                return filePath.substr(0, filePath.size() - fileExtension.size());
             }
             else
             {
@@ -298,6 +298,15 @@ bool openFile(String filePath, const bool createPngIndex = false)
                 return filePath;
             }
         }();
+
+        // PNG以外の画像は弾く
+        String imageExtension = string::lower(PathFindExtension(imagePath.c_str()));
+        if (imageExtension != TEXT(".png"))
+        {
+            errorMessage = TEXT("PNG以外の画像ファイルには対応していません。");
+            throw std::exception{};
+        }
+
         SetWindowText(hWnd, (imagePath + TEXT(" - ") APP_NAME).c_str());
 
         // 後に左右キーで別の画像ファイルに移動できるようにインデックスを作成する
@@ -771,6 +780,10 @@ VOID OnResize()
     windowAreaSize.x = clientRect.right;
     windowAreaSize.y = std::max(clientRect.bottom - imageAreaY, (LONG)1);
 
+    SetWindowPos(hWnd_versionButton, NULL,
+                 std::max(clientRect.right - 28, 400L), 4, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+
     if (image != nullptr)
     {
         recalcImageTransform();
@@ -940,7 +953,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
     {
         rename = 10001,
         exporting = 10002,
-        help = 10003
+        help = 10003,
+        version = 10004
     };
 
     switch (message)
@@ -956,6 +970,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
         constexpr int buttonWidth = 80;
         constexpr int dropBoxWidth = 140;
         constexpr int panelWidth = 400;
+
+        hWnd_versionButton = CreateWindow(TEXT("button"), TEXT("？"),
+                                          WS_VISIBLE | WS_CHILD,
+                                          -rowHeight, 0, rowHeight, rowHeight,
+                                          hWnd, (HMENU)buttonId::version, NULL, NULL);
 
         int x = margin;
         int y = margin;
@@ -1030,30 +1049,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
 
     case WM_COMMAND:
     {
-        if (image == nullptr)
-            return 0;
-
         const auto wID = LOWORD(wParam);
         const auto wNotifyCode = HIWORD(wParam);
         const auto hwndControl = reinterpret_cast<HWND>(lParam);
 
-        if (hwndControl == NULL /* メニューからのメッセージ */)
+        if (hwndControl == NULL /* メニューからのメッセージ */ && image != nullptr)
         {
             if (wID == COMMAND_NORMALIZE_ONE)
-            {
                 exportCrn(false);
-            }
             else if (wID == COMMAND_NORMALIZE_ALL)
-            {
                 exportCrn(true);
-            }
         }
-        else if (wNotifyCode == EN_CHANGE && !inCrnDataToViewData)
+        else if (wNotifyCode == EN_CHANGE && image != nullptr && !inCrnDataToViewData)
         {
             // テキストボックス編集時：crnDataに反映
             viewDataToCrnData(crnData);
         }
-        else if (wNotifyCode == CBN_SELCHANGE)
+        else if (wNotifyCode == CBN_SELCHANGE && image != nullptr)
         {
             if (hwndControl == hWnd_lineType)
             {
@@ -1070,11 +1082,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
         }
         else if (wNotifyCode == BN_CLICKED)
         {
-            if (wID == static_cast<WORD>(buttonId::rename))
+            if (wID == static_cast<WORD>(buttonId::rename) && image != nullptr)
             {
                 batchRenameCrn(crnData.characterName);
             }
-            else if (wID == static_cast<WORD>(buttonId::exporting))
+            else if (wID == static_cast<WORD>(buttonId::exporting) && image != nullptr)
             {
                 POINT p;
                 GetCursorPos(&p);
@@ -1090,6 +1102,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
                            APP_NAME,
                            MB_ICONINFORMATION | MB_OK);
             }
+            else if (wID == static_cast<WORD>(buttonId::version))
+            {
+                MessageBox(hWnd, APP_NAME TEXT(" ") APP_VERSION, TEXT("バージョン情報"), MB_ICONINFORMATION | MB_OK);
+            }
         }
     }
         return 0;
@@ -1097,6 +1113,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
     {
         // ファイルをドロップして開く
         save();
+        pngDirectory.clear();
+        pngFileNames.clear();
+        pngFileIndex = 0;
         unload();
         const auto hDrop = reinterpret_cast<HDROP>(wParam);
         TCHAR fileName[MAX_PATH] = {};

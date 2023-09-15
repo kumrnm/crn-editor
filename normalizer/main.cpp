@@ -1,5 +1,5 @@
 #define PROGRAM_NAME "crn-normalizer"
-#define PROGRAM_VERSION "1.0.0"
+#define PROGRAM_VERSION "1.0"
 
 #include <argparse.hpp>
 #include "normalizer.hpp"
