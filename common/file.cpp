@@ -22,3 +22,27 @@ std::vector<String> getFileList(const String &fileName)
         return result;
     }
 }
+
+String fixFileName(const String &str)
+{
+    String res;
+    for (const auto &c : str)
+    {
+        switch (c)
+        {
+        case TEXT('\\'):
+        case TEXT('/'):
+        case TEXT(':'):
+        case TEXT('*'):
+        case TEXT('?'):
+        case TEXT('"'):
+        case TEXT('<'):
+        case TEXT('>'):
+        case TEXT('|'):
+            continue;
+        default:
+            res.push_back(c);
+        }
+    }
+    return res;
+}

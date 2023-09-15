@@ -8,12 +8,14 @@
 using String = std::wstring;
 using Char = wchar_t;
 using StringStream = std::wstringstream;
+#define Sprintf swprintf
 
 #else
 
 using String = std::string;
 using Char = char;
 using StringStream = std::stringstream;
+#define Sprintf sprintf
 
 #endif
 

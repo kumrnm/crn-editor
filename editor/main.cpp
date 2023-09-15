@@ -12,11 +12,14 @@
 #include "../common/file.hpp"
 #include "resource.h"
 #include <queue>
+#include <unordered_map>
+#include <fstream>
 
 #pragma comment(lib, "Gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
 
 #define APP_NAME TEXT("CRN エディタ")
+#define APP_VERSION TEXT("v1.0.0")
 
 #define DEBUG_LOG(...)                                                \
     {                                                                 \
@@ -52,9 +55,9 @@ CrnData crnData;
 String crnPath;
 
 // 左右キーで別のファイルに移動するための情報
-String pngDirectory;
-std::vector<String> pngFileNames;
-int pngFileIndex = 0;
+String pngDirectory;              // 現在開いているpngファイルが存在するディレクトリ（末尾に円記号を含む）
+std::vector<String> pngFileNames; // pngDirectoryに存在するpngファイルの名前一覧
+int pngFileIndex = 0;             // 現在開いているpngファイルがディレクトリ内で何番目のファイルか
 
 HWND hWnd_characterName, hWnd_imageName, hWnd_lineType, hWnd_direction;
 std::queue<String> errorMessageQueue;
@@ -232,13 +235,13 @@ void viewDataToCrnData(CrnData &crnData, bool onlyPoints = false)
     // コントロール類
     static TCHAR str[1024] = {};
     GetWindowText(hWnd_characterName, str, sizeof(str) / sizeof(TCHAR));
-    crnData.characterName = string::wstring_to_utf8(str);
+    crnData.characterName = string::wstring_to_utf8(fixFileName(str));
     GetWindowText(hWnd_imageName, str, sizeof(str) / sizeof(TCHAR));
-    crnData.imageName = string::wstring_to_utf8(str);
+    crnData.imageName = string::wstring_to_utf8(fixFileName(str));
     crnData.direction = static_cast<CrnData::Direction>(SendMessage(hWnd_direction, CB_GETCURSEL, 0, 0));
 }
 
-bool openFile(String filePath, const bool createPngIndex = false, const bool keepWindowTitleWhenFailed = false)
+bool openFile(String filePath, const bool createPngIndex = false)
 {
     activeObject = OBJECT_NONE;
     editing = false;
@@ -248,12 +251,16 @@ bool openFile(String filePath, const bool createPngIndex = false, const bool kee
 
     String errorMessage;
 
-    TCHAR windowTitleBuffer[keepWindowTitleWhenFailed ? MAX_PATH + 100 : 0];
-    if (keepWindowTitleWhenFailed)
-        GetWindowText(hWnd, windowTitleBuffer, sizeof(windowTitleBuffer) / sizeof(TCHAR));
-
     try
     {
+        // 与えられたパスを絶対パスに変換
+        filePath = [](const String &path) -> String
+        {
+            TCHAR res[MAX_PATH];
+            GetFullPathName(path.c_str(), MAX_PATH, res, NULL);
+            return {res};
+        }(filePath);
+
         // フォルダが指定された場合、フォルダ内の最初のpngファイルを開く
         const auto fileAttribute = GetFileAttributes(filePath.c_str());
         if (fileAttribute != INVALID_FILE_ATTRIBUTES && (fileAttribute & FILE_ATTRIBUTE_DIRECTORY))
@@ -370,9 +377,6 @@ bool openFile(String filePath, const bool createPngIndex = false, const bool kee
         if (errorMessage.empty())
             errorMessage = TEXT("ファイル") + filePath + TEXT("の読み込み時に予期せぬエラーが発生しました");
         showError(errorMessage);
-
-        if (keepWindowTitleWhenFailed)
-            SetWindowText(hWnd, windowTitleBuffer);
 
         return false;
     }
@@ -528,7 +532,8 @@ void batchRenameCrn(const std::string &newName)
                         << TEXT("\" に変更しますか？")
                         << TEXT("\n\nこの操作は元に戻せません。")
                         << TEXT("\nまた、処理には数分かかる可能性があります。");
-        if (MessageBox(hWnd, confirmationMsg.str().c_str(), TEXT("キャラクター名一括変更 - ") APP_NAME, MB_YESNO) != IDYES)
+        if (MessageBox(hWnd, confirmationMsg.str().c_str(),
+                       TEXT("キャラクター名一括変更 - ") APP_NAME, MB_ICONQUESTION | MB_YESNO) != IDYES)
             return;
     }
 
@@ -571,7 +576,180 @@ void batchRenameCrn(const std::string &newName)
               << TEXT("変更済み: ") << changed << TEXT(" 件    ")
               << TEXT("スキップ: ") << skipped << TEXT(" 件    ")
               << TEXT("エラー: ") << failed << TEXT(" 件");
-    MessageBox(hWnd, resultMsg.str().c_str(), TEXT("キャラクター名一括変更 - ") APP_NAME, MB_OK);
+    MessageBox(hWnd, resultMsg.str().c_str(), TEXT("キャラクター名一括変更 - ") APP_NAME, MB_ICONINFORMATION | MB_OK);
+}
+
+void exportCrn(const bool exportAll)
+{
+    if (image == nullptr)
+        return;
+
+    bool subfolderingByStandard = exportAll;
+    bool subfolderingByName = false;
+    if (exportAll)
+    {
+        const auto res = MessageBox(hWnd,
+                                    TEXT("フォルダ内の全ての画像から素材パックを作成します。\n")
+                                        TEXT("これには数分から数十分かかる場合があります。\n\n")
+                                            TEXT("静画素材をキャラクター名ごとのサブフォルダに分類して出力しますか？"),
+                                    TEXT("素材パック出力 - ") APP_NAME,
+                                    MB_ICONQUESTION | MB_YESNOCANCEL);
+        if (res == IDYES)
+            subfolderingByName = true;
+        else if (res == IDCANCEL)
+            return;
+    }
+
+    TCHAR currentExePath[MAX_PATH];
+    GetModuleFileName(NULL, currentExePath, MAX_PATH);
+    TCHAR normalizerPath[MAX_PATH];
+    PathCombine(normalizerPath, currentExePath, TEXT("..\\crn-normalizer.exe"));
+    if (!PathFileExists(normalizerPath))
+    {
+        showError(TEXT("crn-normalizer.exeが見つかりません。\n")
+                      TEXT("crn-editor.exeと同じ場所にcrn-normalizer.exeを配置してください。"));
+        return;
+    }
+
+    save();
+
+    TCHAR outDirPath[MAX_PATH]; // 出力先ディレクトリ
+
+    constexpr char batchFilePath[] = ".temp.crn-editor.bat";
+    bool batchFileGenerated = false;
+    struct batchInterrupted : public std::exception
+    {
+    };
+
+    try
+    {
+        const struct
+        {
+            String name;
+            String identifier;
+        } standards[] = {
+            {TEXT("scene"), TEXT("s")},
+            {TEXT("icon"), TEXT("i")},
+            {TEXT("face"), TEXT("f")}};
+
+        // 出力先ディレクトリを準備
+        SYSTEMTIME systemTime;
+        GetLocalTime(&systemTime);
+        TCHAR outDirName[32];
+        Sprintf(outDirName, TEXT("CRN_%04ld-%02ld-%02ld_%02ld-%02ld-%02ld"),
+                systemTime.wYear, systemTime.wMonth, systemTime.wDay,
+                systemTime.wHour, systemTime.wMinute, systemTime.wSecond);
+        PathCombine(outDirPath, pngDirectory.c_str(), outDirName);
+
+        // 処理対象のcrnファイル
+        std::vector<String> crnPaths;
+        if (exportAll)
+        {
+            for (const auto &crnFileName : getFileList(pngDirectory + TEXT("*.crn")))
+                crnPaths.push_back(pngDirectory + crnFileName);
+        }
+        else
+        {
+            crnPaths.push_back(crnPath);
+        }
+
+        // IDの桁数を決定
+        const int idWidth = [](int n) -> int
+        {
+            int t = 10, y = 1;
+            while (n >= t)
+            {
+                t *= 10;
+                y += 1;
+            }
+            return y;
+        }(crnPaths.size());
+
+        // 処理内容をcommandsに記録する
+        StringStream commands;
+
+        // ディレクトリ作成
+        commands << TEXT("mkdir \"") << outDirPath << TEXT("\"\n");
+        if (subfolderingByStandard)
+            for (const auto &standard : standards)
+                commands << TEXT("mkdir \"") << outDirPath << TEXT("\\") << standard.name << TEXT("\"\n");
+
+        // CRN静画規格のバージョンを出力
+        commands << TEXT("echo 1.0>\"") << outDirPath << TEXT("\\.crnroot\"\n");
+
+        // 素材ごとの処理
+        std::unordered_map<String, int> characterCrnCount;
+        for (const auto &crnPath : crnPaths)
+        {
+            const auto crnData = CrnData::load(string::toMultiByte(crnPath));
+            const auto characterName = string::toString(string::utf8_to_wstring(crnData.characterName));
+
+            // ID作成
+            const auto id = [&]() -> String
+            {
+                StringStream ss;
+                ss << std::setfill(TEXT('0')) << std::right << std::setw(idWidth)
+                   << (characterCrnCount[characterName]++);
+                return ss.str();
+            }();
+
+            for (const auto &standard : standards)
+            {
+                // 出力先指定
+                String thisOutDir = outDirPath;
+                if (subfolderingByStandard)
+                    thisOutDir += TEXT("\\") + standard.name;
+                if (subfolderingByName)
+                {
+                    thisOutDir += TEXT("\\") + characterName;
+                    if (characterCrnCount[characterName] == 1)
+                        commands << TEXT("mkdir \"") << thisOutDir << TEXT("\"\n");
+                }
+
+                // 出力コマンド
+                commands << TEXT("\"") << normalizerPath << TEXT("\" ")
+                         << TEXT("\"") << crnPath << TEXT("\" ")
+                         << TEXT("--") << standard.name << TEXT(" ")
+                         << TEXT("-d \"") << thisOutDir << TEXT("\" ")
+                         << TEXT("-n ") << id << TEXT("\n");
+            }
+        }
+
+        // コマンドをバッチファイルに書き出す
+
+        std::ofstream batchOFS(batchFilePath);
+        batchFileGenerated = true;
+        batchOFS << string::toMultiByte(commands.str()); // Shift-JISに変換して保存
+        batchOFS.close();
+
+        // 実行
+        const int commandReturnValue = system((std::string("cmd.exe /C ") + batchFilePath).c_str());
+        if (commandReturnValue != 0)
+            throw batchInterrupted{};
+
+        MessageBox(hWnd, (TEXT("フォルダ ") + String(outDirPath) + TEXT(" を出力しました")).c_str(),
+                   TEXT("素材パック出力 - ") APP_NAME, MB_ICONINFORMATION | MB_OK);
+    }
+    catch (const batchInterrupted &e)
+    {
+        StringStream msg;
+        msg << TEXT("素材パックの出力処理が中断されました。\n\n")
+            << TEXT("出力フォルダ: ") << outDirPath;
+        MessageBox(hWnd, msg.str().c_str(),
+                   TEXT("素材パック出力 - ") APP_NAME, MB_ICONERROR | MB_OK);
+    }
+    catch (const std::exception &e)
+    {
+        MessageBox(hWnd,
+                   TEXT("素材パックの出力に失敗しました。\n")
+                       TEXT("不正な画像データまたはCRNファイルが存在する可能性があります。"),
+                   TEXT("素材パック出力 - ") APP_NAME,
+                   MB_ICONERROR | MB_OK);
+    }
+
+    // 一時バッチファイルを削除
+    if (batchFileGenerated)
+        DeleteFileA(batchFilePath);
 }
 
 VOID OnMouseUp(const math::Point &p)
@@ -757,6 +935,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
     HDC hdc;
     PAINTSTRUCT ps;
 
+    static HMENU outputMenu;
+    enum struct buttonId : int
+    {
+        rename = 10001,
+        exporting = 10002,
+        help = 10003
+    };
+
     switch (message)
     {
     case WM_CREATE:
@@ -787,7 +973,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
         CreateWindow(TEXT("button"), TEXT("一括変更"),
                      WS_VISIBLE | WS_CHILD,
                      x, y, buttonWidth, rowHeight,
-                     hWnd, (HMENU)1, NULL, NULL);
+                     hWnd, (HMENU)buttonId::rename, NULL, NULL);
 
         y += rowHeight + margin;
         x = margin;
@@ -797,6 +983,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
                      x, y, labelWidth, rowHeight,
                      hWnd, NULL, NULL, NULL);
         x += labelWidth + margin;
+
+        x -= rowHeight + margin;
+        CreateWindow(TEXT("button"), TEXT("？"),
+                     WS_VISIBLE | WS_CHILD,
+                     x, y, rowHeight, rowHeight,
+                     hWnd, (HMENU)buttonId::help, NULL, NULL);
+        x += rowHeight + margin;
+
         hWnd_imageName = CreateWindow(TEXT("edit"), TEXT(""),
                                       WS_VISIBLE | WS_CHILD | WS_BORDER,
                                       x, y, panelWidth - labelWidth - margin * 3, rowHeight,
@@ -825,10 +1019,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
         CreateWindow(TEXT("button"), TEXT("出力"),
                      WS_VISIBLE | WS_CHILD,
                      x, y, 50, rowHeight,
-                     hWnd, (HMENU)2, NULL, NULL);
+                     hWnd, (HMENU)buttonId::exporting, NULL, NULL);
 
         y += rowHeight + margin;
         assert(y == imageAreaY);
+
+        outputMenu = GetSubMenu(LoadMenu(((LPCREATESTRUCT)(lParam))->hInstance, MAKEINTRESOURCE(IDI_OUTPUTMENU)), 0);
     }
         return 0;
 
@@ -841,7 +1037,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
         const auto wNotifyCode = HIWORD(wParam);
         const auto hwndControl = reinterpret_cast<HWND>(lParam);
 
-        if (wNotifyCode == EN_CHANGE && !inCrnDataToViewData)
+        if (hwndControl == NULL /* メニューからのメッセージ */)
+        {
+            if (wID == COMMAND_NORMALIZE_ONE)
+            {
+                exportCrn(false);
+            }
+            else if (wID == COMMAND_NORMALIZE_ALL)
+            {
+                exportCrn(true);
+            }
+        }
+        else if (wNotifyCode == EN_CHANGE && !inCrnDataToViewData)
         {
             // テキストボックス編集時：crnDataに反映
             viewDataToCrnData(crnData);
@@ -863,14 +1070,25 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
         }
         else if (wNotifyCode == BN_CLICKED)
         {
-            if (wID == 1 /* 名前の一括変更 */)
+            if (wID == static_cast<WORD>(buttonId::rename))
             {
                 batchRenameCrn(crnData.characterName);
             }
-            else if (wID == 2 /* 出力 */)
+            else if (wID == static_cast<WORD>(buttonId::exporting))
             {
-                // TODO
-                DEBUG_LOG(TEXT("出力"));
+                POINT p;
+                GetCursorPos(&p);
+                TrackPopupMenu(outputMenu, 0, p.x, p.y, 0, hWnd, NULL);
+            }
+            else if (wID == static_cast<WORD>(buttonId::help))
+            {
+                MessageBox(hWnd,
+                           TEXT("「キャラクター名」「素材名」は正規化後のファイル名に使用されます。\n\n")
+                               TEXT("【例】キャラクター名「RU」素材名「ぷはー」の場合    RU_00s_ぷはー.png\n\n")
+                                   TEXT("ファイル名に使用できない文字を含めることはできません。\n")
+                                       TEXT("素材名は省略可能です。"),
+                           APP_NAME,
+                           MB_ICONINFORMATION | MB_OK);
             }
         }
     }

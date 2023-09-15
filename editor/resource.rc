@@ -1,3 +1,10 @@
 #include "resource.h"
 
 IDI_ICON1 ICON "CRN.ico"
+
+IDI_OUTPUTMENU MENU {
+	POPUP "" {
+		MENUITEM "この画像のみを正規化", COMMAND_NORMALIZE_ONE
+		MENUITEM "フォルダ内の全てのPNG画像から素材パックを作成", COMMAND_NORMALIZE_ALL
+	}
+}
