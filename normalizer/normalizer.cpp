@@ -68,6 +68,13 @@ gil::rgba8_image_t normalize(
     gil::matrix3x2<double> mat =
         gil::matrix3x2<double>::get_scale(1 / scale) *
         gil::matrix3x2<double>::get_translate(-gil::point<double>(paddingLeft, paddingTop));
+    if (crnData.direction == CrnData::Direction::Left)
+    {
+        // flip horizontally
+        mat = gil::matrix3x2<double>::get_translate(-gil::point<double>(res.width(), 0)) *
+              gil::matrix3x2<double>::get_scale(-1.0, 1.0) *
+              mat;
+    }
     gil::resample_pixels(contentView,
                          gil::view(res),
                          mat,
