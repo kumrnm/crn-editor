@@ -16,6 +16,8 @@
 #pragma comment(lib, "Gdiplus.lib")
 #pragma comment(lib, "shlwapi.lib")
 
+#define APP_NAME TEXT("CRN エディタ")
+
 #define DEBUG_LOG(...)                                                \
     {                                                                 \
         StringStream ss;                                              \
@@ -77,6 +79,17 @@ void recalcImageTransform()
         imageTransform.shift.y += imageAreaY;
         need_repaint = 2;
     }
+}
+
+CrnData defaultCrnData(const int imageWidth, const int imageHeight)
+{
+    crnData = CrnData{};
+    const double x = imageWidth * 0.5;
+    const double h = imageHeight;
+    crnData.headPosition = {x, h * 0.25};
+    crnData.headRadius = h * 0.15;
+    crnData.centerLine = {{x, h * 0.05}, {x, h * 0.95}};
+    return crnData;
 }
 
 VOID OnPaint(HDC hdc)
@@ -156,8 +169,9 @@ VOID OnPaint(HDC hdc)
 
     need_repaint = 0;
 
-    while (!errorMessageQueue.empty()) {
-        MessageBox(NULL, errorMessageQueue.front().c_str(), TEXT("CRN エディタ"), MB_ICONERROR | MB_OK);
+    while (!errorMessageQueue.empty())
+    {
+        MessageBox(NULL, errorMessageQueue.front().c_str(), APP_NAME, MB_ICONERROR | MB_OK);
         errorMessageQueue.pop();
     }
 }
@@ -277,7 +291,7 @@ bool openFile(String filePath, const bool createPngIndex = false, const bool kee
                 return filePath;
             }
         }();
-        SetWindowText(hWnd, (TEXT("CRN エディタ - ") + imagePath).c_str());
+        SetWindowText(hWnd, (imagePath + TEXT(" - ") APP_NAME).c_str());
 
         // 後に左右キーで別の画像ファイルに移動できるようにインデックスを作成する
         if (createPngIndex)
@@ -291,7 +305,7 @@ bool openFile(String filePath, const bool createPngIndex = false, const bool kee
             }
             else
             {
-                pngDirectory = TEXT("..\\");
+                pngDirectory = TEXT(".\\");
                 targetLowerName = string::lower(imagePath);
             }
 
@@ -344,12 +358,7 @@ bool openFile(String filePath, const bool createPngIndex = false, const bool kee
         else
         {
             // crnファイルなし：画像サイズに基づくデフォルト値を使用
-            crnData = CrnData{};
-            const double x = newImage->GetWidth() / 2;
-            const double h = newImage->GetHeight();
-            crnData.headPosition = {x, h * 0.25};
-            crnData.headRadius = h * 0.15;
-            crnData.centerLine = {{x, h * 0.05}, {x, h * 0.95}};
+            crnData = defaultCrnData(newImage->GetWidth(), newImage->GetHeight());
         }
 
         image = std::move(newImage);
@@ -497,11 +506,72 @@ void unload()
     SetWindowTextW(hWnd_imageName, TEXT(""));
     SendMessage(hWnd_lineType, CB_SETCURSEL, -1, 0);
     SendMessage(hWnd_direction, CB_SETCURSEL, -1, 0);
-    SetWindowText(hWnd, TEXT("CRN エディタ - "));
+    SetWindowText(hWnd, APP_NAME);
 
     inCrnDataToViewData = false;
 
     need_repaint = 2;
+}
+
+void batchRenameCrn(const std::string &newName)
+{
+    if (image == nullptr)
+        return;
+    save();
+
+    {
+        StringStream confirmationMsg;
+        confirmationMsg << TEXT("同じフォルダに存在する ")
+                        << pngFileNames.size()
+                        << TEXT(" 件のPNG画像のうち、キャラクター名が未設定のものを全て \"")
+                        << string::toString(string::utf8_to_wstring(newName))
+                        << TEXT("\" に変更しますか？")
+                        << TEXT("\n\nこの操作は元に戻せません。")
+                        << TEXT("\nまた、処理には数分かかる可能性があります。");
+        if (MessageBox(NULL, confirmationMsg.str().c_str(), TEXT("キャラクター名一括変更 - ") APP_NAME, MB_YESNO) != IDYES)
+            return;
+    }
+
+    int changed = 0, skipped = 0, failed = 0;
+    for (const auto &pngName : pngFileNames)
+    {
+        const String pngPath = pngDirectory + pngName;
+        const String crnPath = pngPath + TEXT(".crn");
+        try
+        {
+            CrnData data;
+            if (PathFileExists(crnPath.c_str()))
+            {
+                data = CrnData::load(string::toMultiByte(crnPath));
+                if (!data.characterName.empty())
+                {
+                    skipped++;
+                    continue;
+                }
+            }
+            else
+            {
+                Gdiplus::Bitmap img(string::toWideChar(pngPath).c_str());
+                if (img.GetLastStatus() != Gdiplus::Status::Ok)
+                    throw std::exception();
+                data = defaultCrnData(img.GetWidth(), img.GetHeight());
+            }
+            data.characterName = newName;
+            data.save(string::toMultiByte(crnPath));
+            changed++;
+        }
+        catch (...)
+        {
+            failed++;
+        }
+    }
+
+    StringStream resultMsg;
+    resultMsg << TEXT("処理が完了しました\n\n")
+              << TEXT("変更済み: ") << changed << TEXT(" 件    ")
+              << TEXT("スキップ: ") << skipped << TEXT(" 件    ")
+              << TEXT("エラー: ") << failed << TEXT(" 件");
+    MessageBox(NULL, resultMsg.str().c_str(), TEXT("キャラクター名一括変更 - ") APP_NAME, MB_OK);
 }
 
 VOID OnMouseUp(const math::Point &p)
@@ -635,17 +705,17 @@ INT WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR lpCmdLine, INT iCmdShow
     RegisterClass(&wndClass);
 
     hWnd = CreateWindow(
-        TEXT("crnEditor"),    // window class name
-        TEXT("CRN エディタ"), // window caption
-        WS_OVERLAPPEDWINDOW,  // window style
-        CW_USEDEFAULT,        // initial x position
-        CW_USEDEFAULT,        // initial y position
-        CW_USEDEFAULT,        // initial x size
-        CW_USEDEFAULT,        // initial y size
-        NULL,                 // parent window handle
-        NULL,                 // window menu handle
-        hInstance,            // program instance handle
-        NULL);                // creation parameters
+        TEXT("crnEditor"),   // window class name
+        APP_NAME,            // window caption
+        WS_OVERLAPPEDWINDOW, // window style
+        CW_USEDEFAULT,       // initial x position
+        CW_USEDEFAULT,       // initial y position
+        CW_USEDEFAULT,       // initial x size
+        CW_USEDEFAULT,       // initial y size
+        NULL,                // parent window handle
+        NULL,                // window menu handle
+        hInstance,           // program instance handle
+        NULL);               // creation parameters
 
     DragAcceptFiles(hWnd, TRUE);
 
@@ -795,8 +865,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message,
         {
             if (wID == 1 /* 名前の一括変更 */)
             {
-                // TODO
-                DEBUG_LOG(TEXT("一括変更"));
+                batchRenameCrn(crnData.characterName);
             }
             else if (wID == 2 /* 出力 */)
             {
