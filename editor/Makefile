@@ -1,5 +1,5 @@
 crn-editor.exe: $(patsubst %.cpp,%.o,$(wildcard *.cpp ../common/*.cpp)) resource.o
-	g++ -mwindows $^ -lgdiplus -lshlwapi -static-libgcc -static-libstdc++ -o $@
+	g++ -mwindows $^ -static -lgdiplus -lshlwapi -lstdc++ -lgcc -lwinpthread -o $@
 
 resource.o: resource.rc CRN.ico
 	windres $< -o $@
